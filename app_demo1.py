@@ -4,6 +4,7 @@ import subprocess
 import glob
 import urllib.request
 import shutil
+import sys
 
 # -------------------------------------------------------------
 # Asset Management
@@ -69,18 +70,23 @@ def generate_video(
             
         print(f"Generating TTS Audio with cloned voice...")
         
-        # We run OpenVoice V2 as an isolated subprocess script to prevent PyTorch memory fragmentation.
+        # Cross-Environment Execution: Write a script to be executed by openvoice_env
         openvoice_script = f"""
 import torch
 import os
 import sys
 
-# Append OpenVoice directly to python path
+# Append OpenVoice and MeloTTS to path
 sys.path.append(os.path.abspath('OpenVoice'))
+sys.path.append(os.path.abspath('MeloTTS'))
 
-from openvoice import se_extractor
-from openvoice.api import ToneColorConverter
-from melo.api import TTS
+try:
+    from openvoice import se_extractor
+    from openvoice.api import ToneColorConverter
+    from melo.api import TTS
+except ImportError as e:
+    print(f"Critical OpenVoice Module Import Error: {{e}}")
+    sys.exit(1)
 
 try:
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -119,15 +125,21 @@ except Exception as e:
         with open("run_openvoice.py", "w", encoding="utf-8") as f:
             f.write(openvoice_script)
             
+        openvoice_python = os.path.abspath(os.path.join("openvoice_env", "bin", "python"))
+        if not os.path.exists(openvoice_python):
+            # Windows fallback
+            openvoice_python = os.path.abspath(os.path.join("openvoice_env", "Scripts", "python.exe"))
+
         try:
-            subprocess.run(["python", "run_openvoice.py"], check=True)
+            print("Running isolated OpenVoice environment command...")
+            subprocess.run([openvoice_python, "run_openvoice.py"], check=True)
             if not os.path.exists(out_audio_path):
-                return None, "OpenVoice Output failed to generate."
+                return None, "OpenVoice Output failed to generate (File not found)."
         except subprocess.CalledProcessError as e:
-            return None, f"OpenVoice TTS Error: {e}"
+            return None, f"OpenVoice TTS Subprocess Error: {e}"
             
     # 3. SadTalker Lip Sync (Commercial Compliant - NO GFPGAN)
-    print("Running SadTalker Pipeline...")
+    print("Running SadTalker Pipeline (in SadTalker Environment)...")
     result_dir = os.path.abspath("./results_demo1")
     os.makedirs(result_dir, exist_ok=True)
     
@@ -137,9 +149,8 @@ except Exception as e:
     
     sadtalker_path = os.path.abspath("SadTalker/inference.py")
     if not os.path.exists(sadtalker_path):
-        return None, "SadTalker not found. Have you run setup_demo1.sh?"
+        return None, "SadTalker Inference file not found. Have you run setup_demo1.sh?"
         
-    import sys
     sadtalker_cmd = [
         sys.executable, sadtalker_path,
         "--driven_audio", out_audio_path,
@@ -147,7 +158,7 @@ except Exception as e:
         "--result_dir", result_dir,
         "--still",
         "--preprocess", "crop",
-        # NOTE: WE EXPLICITLY DO NOT USE GFPGAN TO REMAIN COMMERCIAL COMPLIANT
+        # NOTE: GFPGAN REMOVED FOR COMMERCIAL COMPLIANCE
         "--pose_style", str(pose_style),
         "--expression_scale", str(emotion_intensity)
     ]
@@ -168,7 +179,7 @@ except Exception as e:
 # -------------------------------------------------------------
 with gr.Blocks(title="VDAM Demo 1: Expressive Cloner", theme=gr.themes.Soft()) as demo:
     gr.Markdown("# 🎬 VDAM AI Studio - Demo 1 (Expressive Cloner)")
-    gr.Markdown("**Models:** OpenVoice V2 (*Instant Voice Cloning*) + SadTalker (*Lip Sync without GFPGAN*)")
+    gr.Markdown("**Models:** OpenVoice V2 (*Instant Voice Cloning*) + SadTalker (*Lip Sync*)")
     gr.Markdown("---")
     
     with gr.Row():
