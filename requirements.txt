@@ -1,0 +1,11 @@
+gradio>=4.0.0
+TTS>=0.22.0
+torch
+torchaudio
+torchvision
+numpy
+scipy
+opencv-python
+imageio
+safetensors
+pydub
