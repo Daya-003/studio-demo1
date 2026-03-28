@@ -13,26 +13,28 @@ def download_default_assets():
     """Automatically fetch fallback images and voice files from Open Source repos"""
     os.makedirs("assets", exist_ok=True)
     assets = {
-        "female_avatar.png": "https://raw.githubusercontent.com/OpenTalker/SadTalker/main/examples/source_image/art_1.png",
-        "male_avatar.png": "https://raw.githubusercontent.com/OpenTalker/SadTalker/main/examples/source_image/art_2.png",
-        "female_voice.wav": "https://raw.githubusercontent.com/OpenTalker/SadTalker/main/examples/driven_audio/RD_Radio31_000.wav",
-        "male_voice.wav": "https://raw.githubusercontent.com/OpenTalker/SadTalker/main/examples/driven_audio/macron.wav"
+        "woman_avatar.png": "https://raw.githubusercontent.com/OpenTalker/SadTalker/main/examples/source_image/art_1.png",
+        "man_avatar.png": "https://raw.githubusercontent.com/OpenTalker/SadTalker/main/examples/source_image/art_2.png",
+        "alexa_voice.wav": "https://raw.githubusercontent.com/neonbjb/tortoise-tts/main/tortoise/voices/angie/1.wav",
+        "siri_voice.wav": "https://raw.githubusercontent.com/neonbjb/tortoise-tts/main/tortoise/voices/tom/1.wav"
     }
     for filename, url in assets.items():
         filepath = os.path.join("assets", filename)
         if not os.path.exists(filepath):
             print(f"Downloading default asset: {filename}...")
             try:
-                urllib.request.urlretrieve(url, filepath)
+                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req) as response, open(filepath, 'wb') as out_file:
+                    shutil.copyfileobj(response, out_file)
             except Exception as e:
                 print(f"Failed to download {filename}: {e}")
 
 download_default_assets()
 
-DEFAULT_FEMALE_AVATAR = os.path.abspath("assets/female_avatar.png")
-DEFAULT_MALE_AVATAR = os.path.abspath("assets/male_avatar.png")
-DEFAULT_FEMALE_VOICE = os.path.abspath("assets/female_voice.wav")
-DEFAULT_MALE_VOICE = os.path.abspath("assets/male_voice.wav")
+DEFAULT_WOMAN_AVATAR = os.path.abspath("assets/woman_avatar.png")
+DEFAULT_MAN_AVATAR = os.path.abspath("assets/man_avatar.png")
+DEFAULT_ALEXA_VOICE = os.path.abspath("assets/alexa_voice.wav")
+DEFAULT_SIRI_VOICE = os.path.abspath("assets/siri_voice.wav")
 
 # -------------------------------------------------------------
 # AI Pipeline Execution
@@ -44,7 +46,8 @@ def generate_video(
 ):
     # 1. Image Resolution
     if avatar_mode == "Built-in Avatars":
-        source_image = DEFAULT_FEMALE_AVATAR if "Female" in builtin_avatar else DEFAULT_MALE_AVATAR
+        source_image = DEFAULT_WOMAN_AVATAR if "Woman" in builtin_avatar else DEFAULT_MAN_AVATAR
+        if not os.path.exists(source_image): return None, f"Error: Default image {source_image} missing."
     else:
         if not custom_avatar: return None, "Error: Upload a Custom Avatar image first."
         source_image = os.path.abspath(custom_avatar)
@@ -60,13 +63,15 @@ def generate_video(
         if not text_input or not text_input.strip():
             return None, "Error: Enter Text-to-Speech prompt."
             
-        if builtin_voice == "Female Reference":
-            ref_audio = DEFAULT_FEMALE_VOICE
-        elif builtin_voice == "Male Reference":
-            ref_audio = DEFAULT_MALE_VOICE
+        if builtin_voice == "Alexa (Preset)":
+            ref_audio = DEFAULT_ALEXA_VOICE
+        elif builtin_voice == "Siri (Preset)":
+            ref_audio = DEFAULT_SIRI_VOICE
         else:
             if not custom_voice: return None, "Error: Upload reference audio for cloning."
             ref_audio = os.path.abspath(custom_voice)
+            
+        if not os.path.exists(ref_audio): return None, f"Error: Audio file {ref_audio} missing."
             
         print(f"Generating TTS Audio with cloned voice...")
         
@@ -147,6 +152,9 @@ except Exception as e:
     emotion_map = {"Neutral": 0, "Happy": 10, "Serious": 20, "Surprise": 30}
     pose_style = emotion_map.get(emotion_type, 0)
     
+    # Scale user's 1-100% intensity to 1.0 - 2.0 because SadTalker expects 1.0 approx
+    scale_factor = 1.0 + (float(emotion_intensity) / 100.0)
+    
     sadtalker_path = os.path.abspath("SadTalker/inference.py")
     if not os.path.exists(sadtalker_path):
         return None, "SadTalker Inference file not found. Have you run setup_demo1.sh?"
@@ -160,7 +168,7 @@ except Exception as e:
         "--preprocess", "crop",
         # NOTE: GFPGAN REMOVED FOR COMMERCIAL COMPLIANCE
         "--pose_style", str(pose_style),
-        "--expression_scale", str(emotion_intensity)
+        "--expression_scale", f"{scale_factor:.2f}"
     ]
     
     try:
@@ -187,12 +195,23 @@ with gr.Blocks(title="VDAM Demo 1: Expressive Cloner", theme=gr.themes.Soft()) a
         with gr.Column(scale=1):
             gr.Markdown("### 1. Character Selection")
             avatar_mode = gr.Radio(["Built-in Avatars", "Upload Custom Avatar"], label="Method", value="Built-in Avatars")
-            builtin_avatar = gr.Dropdown(["Female Studio Avatar", "Male Studio Avatar"], label="Predefined", value="Female Studio Avatar")
-            custom_avatar = gr.Image(label="Upload Image File", type="filepath", visible=False)
+            
+            # Predefined Options
+            builtin_avatar = gr.Dropdown(["System Image - Woman", "System Image - Man"], label="Predefined Avatar", value="System Image - Woman")
+            preview_avatar = gr.Image(value=DEFAULT_WOMAN_AVATAR, label="Preview Predefined", interactive=False, height=200)
+            
+            # Custom Upload
+            custom_avatar = gr.Image(label="Upload Custom Image File", type="filepath", visible=False)
+            
+            def update_avatar_preview(selected):
+                img_path = DEFAULT_WOMAN_AVATAR if "Woman" in selected else DEFAULT_MAN_AVATAR
+                return gr.update(value=img_path)
+            builtin_avatar.change(fn=update_avatar_preview, inputs=builtin_avatar, outputs=preview_avatar)
             
             def toggle_avatar(mode):
-                return gr.update(visible=mode=="Upload Custom Avatar"), gr.update(visible=mode=="Built-in Avatars")
-            avatar_mode.change(fn=toggle_avatar, inputs=avatar_mode, outputs=[custom_avatar, builtin_avatar])
+                is_custom = mode == "Upload Custom Avatar"
+                return gr.update(visible=is_custom), gr.update(visible=not is_custom), gr.update(visible=not is_custom)
+            avatar_mode.change(fn=toggle_avatar, inputs=avatar_mode, outputs=[custom_avatar, builtin_avatar, preview_avatar])
             
         # COLUMN 2: Audio
         with gr.Column(scale=1):
@@ -203,12 +222,18 @@ with gr.Blocks(title="VDAM Demo 1: Expressive Cloner", theme=gr.themes.Soft()) a
             with gr.Group() as tts_group:
                 text_input = gr.Textbox(label="Text Prompt", placeholder="Type what the avatar should say...", lines=2)
                 gr.Markdown("Select a voice to clone (OpenVoice V2):")
-                builtin_voice = gr.Radio(["Female Reference", "Male Reference", "Upload Custom reference"], label="Voice Target", value="Female Reference")
+                builtin_voice = gr.Radio(["Alexa (Preset)", "Siri (Preset)", "Upload Custom reference"], label="Voice Target", value="Alexa (Preset)")
+                
+                # Hidden audio player for preset preview
+                preset_voice_preview = gr.Audio(value=DEFAULT_ALEXA_VOICE, interactive=False, label="Voice Preview")
                 custom_voice = gr.Audio(label="Upload your voice (WAV/MP3)", type="filepath", visible=False)
                 
-                def toggle_custom_voice(choice):
-                    return gr.update(visible=choice=="Upload Custom reference")
-                builtin_voice.change(fn=toggle_custom_voice, inputs=builtin_voice, outputs=custom_voice)
+                def update_voice_preview(choice):
+                    is_custom = choice == "Upload Custom reference"
+                    default_audio = DEFAULT_ALEXA_VOICE if choice == "Alexa (Preset)" else DEFAULT_SIRI_VOICE
+                    return gr.update(visible=is_custom), gr.update(visible=not is_custom, value=default_audio)
+                
+                builtin_voice.change(fn=update_voice_preview, inputs=builtin_voice, outputs=[custom_voice, preset_voice_preview])
                 
             # Direct Audio Group
             with gr.Group(visible=False) as direct_audio_group:
@@ -229,9 +254,9 @@ with gr.Blocks(title="VDAM Demo 1: Expressive Cloner", theme=gr.themes.Soft()) a
                 info="SadTalker base pose style"
             )
             emotion_intensity = gr.Slider(
-                minimum=0.0, maximum=3.0, value=1.0, step=0.1, 
+                minimum=1, maximum=100, value=50, step=1, 
                 label="Emotion Intensity (%)", 
-                info="1.0 is Normal, higher is more exaggerated."
+                info="Percentage of exaggeration applied to the expression."
             )
             
             generate_btn = gr.Button("🚀 Generate Demo 1 Video", variant="primary", size="lg")
@@ -253,3 +278,4 @@ with gr.Blocks(title="VDAM Demo 1: Expressive Cloner", theme=gr.themes.Soft()) a
 if __name__ == "__main__":
     print("Booting Demo 1 Server...")
     demo.queue().launch(share=True)
+
