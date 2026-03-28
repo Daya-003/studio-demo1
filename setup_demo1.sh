@@ -1,26 +1,23 @@
 #!/bin/bash
-echo "Setting up Demo 1 (OpenVoice V2 + Commercial Compliant SadTalker)..."
+echo "Setting up Demo 1 with STRICT ENVIRONMENT ISOLATION to prevent module errors..."
 
-# Note: Google Colab uses Python 3.12, but models require Python 3.10.
+# 1. Base OS Packages required for Audio and TTS (MeloTTS needs mecab)
 sudo apt-get update
-sudo apt-get install -y software-properties-common
+sudo apt-get install -y software-properties-common mecab libmecab-dev mecab-ipadic-utf8 build-essential ffmpeg
 sudo add-apt-repository -y ppa:deadsnakes/ppa
 sudo apt-get update
 sudo apt-get install -y python3.10 python3.10-venv python3.10-dev unzip wget git
 
-# Create a virtual environment with Python 3.10 if it doesn't exist
-if [ ! -d "ai_env" ]; then
-    python3.10 -m venv ai_env
+echo "============================================="
+echo "Building Environment 1: OpenVoice V2"
+echo "============================================="
+if [ ! -d "openvoice_env" ]; then
+    python3.10 -m venv openvoice_env
 fi
-
-# Activate the environment
-source ai_env/bin/activate
-
-echo "Installing Core Dependencies for Python Backend..."
+source openvoice_env/bin/activate
 pip install --upgrade pip setuptools wheel
-pip install gradio torch torchvision torchaudio numpy scipy opencv-python imageio pydub
+pip install torch torchvision torchaudio
 
-echo "Setting up OpenVoice V2..."
 if [ ! -d "OpenVoice" ]; then
     git clone https://github.com/myshell-ai/OpenVoice.git
     cd OpenVoice
@@ -28,7 +25,6 @@ if [ ! -d "OpenVoice" ]; then
     cd ..
 fi
 
-echo "Installing MeloTTS..."
 if [ ! -d "MeloTTS" ]; then
     git clone https://github.com/myshell-ai/MeloTTS.git
     cd MeloTTS
@@ -37,26 +33,35 @@ if [ ! -d "MeloTTS" ]; then
     cd ..
 fi
 
-echo "Downloading OpenVoice V2 Checkpoints..."
 if [ ! -d "checkpoints_v2" ]; then
     wget -q https://myshell-public-repo-hosting.s3.amazonaws.com/openvoice/checkpoints_v2_0417.zip
     unzip -q checkpoints_v2_0417.zip
 fi
+deactivate
+echo "OpenVoice Environment Built!"
 
-echo "Checking for SadTalker module..."
+echo "============================================="
+echo "Building Environment 2: SadTalker UI"
+echo "============================================="
+if [ ! -d "sadtalker_env" ]; then
+    python3.10 -m venv sadtalker_env
+fi
+source sadtalker_env/bin/activate
+pip install --upgrade pip setuptools wheel
+pip install gradio pydub
+
 if [ ! -d "SadTalker" ]; then
-    echo "Cloning open-source SadTalker repository for Lip Syncing..."
     git clone https://github.com/OpenTalker/SadTalker.git
-    
     cd SadTalker
-    echo "Downloading SadTalker Checkpoint Models..."
     bash scripts/download_models.sh
     pip install -r requirements.txt
     cd ..
-else
-    echo "SadTalker exists!"
 fi
+deactivate
+echo "SadTalker Environment Built!"
 
-echo "Environment Setup Completed Successfully!"
-echo "To run Demo 1, you MUST USE the virtual environment:"
-echo "!source ai_env/bin/activate && python app_demo1.py"
+echo "============================================="
+echo "Setup Complete!"
+echo "To run Demo 1, activate the SadTalker environment ONLY:"
+echo "!source sadtalker_env/bin/activate && python app_demo1.py"
+echo "============================================="
