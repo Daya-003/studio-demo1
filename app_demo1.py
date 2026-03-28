@@ -12,22 +12,29 @@ import sys
 def download_default_assets():
     """Automatically fetch fallback images and voice files from Open Source repos"""
     os.makedirs("assets", exist_ok=True)
-    assets = {
+    images = {
         "woman_avatar.png": "https://raw.githubusercontent.com/OpenTalker/SadTalker/main/examples/source_image/art_1.png",
         "man_avatar.png": "https://raw.githubusercontent.com/OpenTalker/SadTalker/main/examples/source_image/art_2.png",
-        "alexa_voice.wav": "https://raw.githubusercontent.com/neonbjb/tortoise-tts/main/tortoise/voices/angie/1.wav",
-        "siri_voice.wav": "https://raw.githubusercontent.com/neonbjb/tortoise-tts/main/tortoise/voices/tom/1.wav"
     }
-    for filename, url in assets.items():
+    for filename, url in images.items():
         filepath = os.path.join("assets", filename)
         if not os.path.exists(filepath):
             print(f"Downloading default asset: {filename}...")
             try:
-                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req) as response, open(filepath, 'wb') as out_file:
-                    shutil.copyfileobj(response, out_file)
+                urllib.request.urlretrieve(url, filepath)
             except Exception as e:
                 print(f"Failed to download {filename}: {e}")
+                
+    # Generate default voices if missing
+    alexa_path = os.path.join("assets", "alexa_voice.wav")
+    if not os.path.exists(alexa_path):
+        subprocess.run(['powershell', '-Command', 
+            "Add-Type -AssemblyName System.Speech; $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer; $synth.SetOutputToWaveFile('" + os.path.abspath(alexa_path) + "'); $synth.Speak('Hello, welcome to VDAM A1 Asset AI Studio.'); $synth.Dispose()"])
+            
+    siri_path = os.path.join("assets", "siri_voice.wav")
+    if not os.path.exists(siri_path):
+        subprocess.run(['powershell', '-Command', 
+            "Add-Type -AssemblyName System.Speech; $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer; $synth.SetOutputToWaveFile('" + os.path.abspath(siri_path) + "'); $synth.SelectVoiceByHints('Female'); $synth.Speak('Hi! Welcome to VDAM A1 Asset AI Studio.'); $synth.Dispose()"])
 
 download_default_assets()
 
@@ -152,9 +159,6 @@ except Exception as e:
     emotion_map = {"Neutral": 0, "Happy": 10, "Serious": 20, "Surprise": 30}
     pose_style = emotion_map.get(emotion_type, 0)
     
-    # Scale user's 1-100% intensity to 1.0 - 2.0 because SadTalker expects 1.0 approx
-    scale_factor = 1.0 + (float(emotion_intensity) / 100.0)
-    
     sadtalker_path = os.path.abspath("SadTalker/inference.py")
     if not os.path.exists(sadtalker_path):
         return None, "SadTalker Inference file not found. Have you run setup_demo1.sh?"
@@ -168,7 +172,7 @@ except Exception as e:
         "--preprocess", "crop",
         # NOTE: GFPGAN REMOVED FOR COMMERCIAL COMPLIANCE
         "--pose_style", str(pose_style),
-        "--expression_scale", f"{scale_factor:.2f}"
+        "--expression_scale", str(emotion_intensity)
     ]
     
     try:
@@ -201,7 +205,12 @@ with gr.Blocks(title="VDAM Demo 1: Expressive Cloner", theme=gr.themes.Soft()) a
             preview_avatar = gr.Image(value=DEFAULT_WOMAN_AVATAR, label="Preview Predefined", interactive=False, height=200)
             
             # Custom Upload
-            custom_avatar = gr.Image(label="Upload Custom Image File", type="filepath", visible=False)
+            custom_avatar = gr.Image(
+                label="Upload Custom Image File", 
+                type="filepath", 
+                visible=False,
+                info="Ensure the mouth is closed and the lighting is even."
+            )
             
             def update_avatar_preview(selected):
                 img_path = DEFAULT_WOMAN_AVATAR if "Woman" in selected else DEFAULT_MAN_AVATAR
@@ -220,13 +229,23 @@ with gr.Blocks(title="VDAM Demo 1: Expressive Cloner", theme=gr.themes.Soft()) a
             
             # TTS Group
             with gr.Group() as tts_group:
-                text_input = gr.Textbox(label="Text Prompt", placeholder="Type what the avatar should say...", lines=2)
+                text_input = gr.Textbox(
+                    label="Text Prompt", 
+                    value="Hello, welcome to VDAM A1 Asset AI Studio.",
+                    placeholder="Type what the avatar should say...", 
+                    lines=2
+                )
                 gr.Markdown("Select a voice to clone (OpenVoice V2):")
                 builtin_voice = gr.Radio(["Alexa (Preset)", "Siri (Preset)", "Upload Custom reference"], label="Voice Target", value="Alexa (Preset)")
                 
                 # Hidden audio player for preset preview
                 preset_voice_preview = gr.Audio(value=DEFAULT_ALEXA_VOICE, interactive=False, label="Voice Preview")
-                custom_voice = gr.Audio(label="Upload your voice (WAV/MP3)", type="filepath", visible=False)
+                custom_voice = gr.Audio(
+                    label="Upload your voice (WAV/MP3)", 
+                    type="filepath", 
+                    visible=False,
+                    info="Record or let user upload a 10-second clean audio clip of someone speaking (no background noise)."
+                )
                 
                 def update_voice_preview(choice):
                     is_custom = choice == "Upload Custom reference"
@@ -237,7 +256,11 @@ with gr.Blocks(title="VDAM Demo 1: Expressive Cloner", theme=gr.themes.Soft()) a
                 
             # Direct Audio Group
             with gr.Group(visible=False) as direct_audio_group:
-                direct_audio = gr.Audio(label="Upload spoken audio file", type="filepath")
+                direct_audio = gr.Audio(
+                    label="Upload spoken audio file", 
+                    type="filepath",
+                    info="Record or let user upload a 10-second clean audio clip of someone speaking (no background noise)."
+                )
                 
             def toggle_audio_mode(mode):
                 is_tts = (mode == "Text-to-Speech Mode")
@@ -254,9 +277,9 @@ with gr.Blocks(title="VDAM Demo 1: Expressive Cloner", theme=gr.themes.Soft()) a
                 info="SadTalker base pose style"
             )
             emotion_intensity = gr.Slider(
-                minimum=1, maximum=100, value=50, step=1, 
+                minimum=1, maximum=100, value=1.0, step=0.1, 
                 label="Emotion Intensity (%)", 
-                info="Percentage of exaggeration applied to the expression."
+                info="1.0 is Normal, higher is more exaggerated."
             )
             
             generate_btn = gr.Button("🚀 Generate Demo 1 Video", variant="primary", size="lg")
@@ -278,4 +301,3 @@ with gr.Blocks(title="VDAM Demo 1: Expressive Cloner", theme=gr.themes.Soft()) a
 if __name__ == "__main__":
     print("Booting Demo 1 Server...")
     demo.queue().launch(share=True)
-
