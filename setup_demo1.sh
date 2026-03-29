@@ -10,7 +10,7 @@ echo ">>> Setting up VDAM AI Studio Demo 1..."
 echo ">>> Installing Python Packages..."
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 pip install transformers diffusers accelerate gradio edge-tts scipy moviepy
-pip install safetensors huggingface_hub
+pip install safetensors huggingface_hub sentencepiece protobuf
 
 # 2. Clone Repositories
 echo ">>> Cloning Repositories..."
@@ -54,3 +54,4 @@ edge-tts --text "Hello there! This is a predefined reference voice sample for yo
 edge-tts --text "Hello there! This is a predefined reference voice sample for your virtual AI studio demo. You can use it as a base for voice cloning or lip syncing." --voice en-US-GuyNeural --write-media demo1/assets/alexa_male.wav
 
 echo ">>> Demo 1 setup complete! You can now run: python demo1/app_demo1.py"
+
