@@ -1,268 +1,509 @@
 import gradio as gr
 import torch
+import numpy as np
+from PIL import Image
 import os
 import sys
 import tempfile
 import asyncio
-import subprocess
-import edge_tts
-import glob
 from pathlib import Path
-from PIL import Image
+import time
+from datetime import datetime
+import subprocess
+import glob
 
 sys.path.append('demo1/OpenVoice')
 sys.path.append('demo1/SadTalker')
 
-# --- Global State for Diffusers ---
-current_loaded_model = None
-active_pipeline = None
+HAS_FLUX = False
+HAS_SVD = False
 
-def unload_models():
-    """Unload diffusers pipelines from VRAM."""
-    global current_loaded_model, active_pipeline
-    if active_pipeline is not None:
-        print(f"Unloading {current_loaded_model} from VRAM...")
-        del active_pipeline
-        active_pipeline = None
-        current_loaded_model = None
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-def load_flux():
-    global current_loaded_model, active_pipeline
-    if current_loaded_model == "flux":
-        return active_pipeline
-    unload_models()
+try:
     from diffusers import FluxPipeline
-    print("Loading FLUX.1-schnell...")
-    pipe = FluxPipeline.from_pretrained("black-forest-labs/FLUX.1-schnell", torch_dtype=torch.bfloat16)
-    pipe = pipe.to("cuda" if torch.cuda.is_available() else "cpu")
-    current_loaded_model = "flux"
-    active_pipeline = pipe
-    return pipe
+    HAS_FLUX = True
+except:
+    pass
 
-def load_svd():
-    global current_loaded_model, active_pipeline
-    if current_loaded_model == "svd":
-        return active_pipeline
-    unload_models()
+try:
     from diffusers import StableVideoDiffusionPipeline
-    print("Loading SVD...")
-    pipe = StableVideoDiffusionPipeline.from_pretrained(
-        "stabilityai/stable-video-diffusion-img2vid-xt", torch_dtype=torch.float16, variant="fp16"
-    )
-    if torch.cuda.is_available():
-        pipe.enable_model_cpu_offload()
-    current_loaded_model = "svd"
-    active_pipeline = pipe
-    return pipe
-
-# --- Inference Functions ---
-
-def infer_flux(prompt):
-    pipe = load_flux()
-    result = pipe(prompt, num_inference_steps=4, guidance_scale=0.0).images[0]
-    return result
-
-def infer_svd(image_input):
-    if image_input is None:
-        return None
-    pipe = load_svd()
-    if isinstance(image_input, str):
-        image_input = Image.open(image_input).convert("RGB")
-    
-    # Resize for SVD
-    image_input = image_input.resize((1024, 576))
-    frames = pipe(image_input, decode_chunk_size=8, generator=torch.manual_seed(42)).frames[0]
-    
-    out_path = os.path.join(tempfile.gettempdir(), "svd_output.mp4")
     from diffusers.utils import export_to_video
-    export_to_video(frames, out_path, fps=7)
-    return out_path
+    HAS_SVD = True
+except:
+    pass
 
-def infer_lipsync(
-    avatar_type, avatar_upload, builtin_avatar,
-    audio_type, tts_text, tts_voice, tts_clone_ref, direct_audio_upload,
-    emotion, intensity
-):
-    """Handles OpenVoice TTS generation -> SadTalker video generation via subprocesses."""
-    unload_models()
-    yield None, "Preparing Avatar..."
-
-    # 1. Resolve Image
-    if avatar_type == "Upload Avatar" and avatar_upload is not None:
-        face_img = avatar_upload
-    else:
-        face_img = "demo1/assets/female_avatar.png" if builtin_avatar == "Female Studio Avatar" else "demo1/assets/male_avatar.png"
+class VDAMStudio:
+    def __init__(self):
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+        self.flux_pipe = None
+        self.svd_pipe = None
+        self.temp_dir = tempfile.mkdtemp()
+        
+        # Ensure directories exist
+        os.makedirs("demo1/assets", exist_ok=True)
+        os.makedirs("demo1/checkpoints/openvoice", exist_ok=True)
+        
+        # Base avatars and reference audio must exist or be created
+        self.avatar_dict = {
+            "Female Studio Avatar": "assets/female_avatar.png",
+            "Male Studio Avatar": "assets/male_avatar.png",
+        }
+        
+        self.voice_dict = {
+            "Alexa (Female)": "demo1/assets/siri_female.wav",
+            "Siri (Male)": "demo1/assets/alexa_male.wav",
+        }
     
-    if not os.path.exists(face_img):
-        yield None, f"Avatar file not found: {face_img}"
-        return
-
-    # 2. Resolve Audio
-    final_audio = None
-    if audio_type == "Direct Audio Mode" and direct_audio_upload is not None:
-        final_audio = direct_audio_upload
-        yield None, "Using Direct Audio..."
-    else:
-        yield None, "Generating Text-to-Speech..."
-        temp_tts = os.path.join(tempfile.gettempdir(), "base_tts.wav")
-        v_name = "en-US-AriaNeural" if tts_voice == "Alexa (Female)" else "en-US-GuyNeural"
-        
-        async def _gen():
-            c = edge_tts.Communicate(tts_text, v_name)
-            await c.save(temp_tts)
-        asyncio.run(_gen())
-        final_audio = temp_tts
-        
-        # Zero-shot voice cloning
-        if audio_type == "Reference Audio for Cloning" and tts_clone_ref is not None:
-            yield None, "Cloning Voice via OpenVoice..."
-            cloned_audio = os.path.join(tempfile.gettempdir(), "cloned_tts.wav")
-            ov_script = f"""import sys, torch
+    def unload_models(self):
+        """Free VRAM by unloading diffusers models."""
+        if self.flux_pipe is not None:
+            del self.flux_pipe
+            self.flux_pipe = None
+        if self.svd_pipe is not None:
+            del self.svd_pipe
+            self.svd_pipe = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
+    def load_flux_pipeline(self):
+        if self.flux_pipe is None:
+            try:
+                self.unload_models()
+                print("Loading FLUX pipeline...")
+                self.flux_pipe = FluxPipeline.from_pretrained(
+                    "black-forest-labs/FLUX.1-schnell", # Use schnell for free commercial use & speed
+                    torch_dtype=self.dtype
+                )
+                self.flux_pipe = self.flux_pipe.to(self.device)
+                print("FLUX pipeline loaded successfully!")
+            except Exception as e:
+                print(f"Error loading FLUX: {e}")
+                return False
+        return True
+    
+    def load_svd_pipeline(self):
+        if self.svd_pipe is None:
+            try:
+                self.unload_models()
+                print("Loading SVD pipeline...")
+                self.svd_pipe = StableVideoDiffusionPipeline.from_pretrained(
+                    "stabilityai/stable-video-diffusion-img2vid-xt",
+                    torch_dtype=torch.float16, variant="fp16"
+                )
+                if torch.cuda.is_available():
+                    self.svd_pipe.enable_model_cpu_offload()
+                print("SVD pipeline loaded successfully!")
+            except Exception as e:
+                print(f"Error loading SVD: {e}")
+                return False
+        return True
+    
+    def generate_text_to_image(self, prompt, style="photorealistic", height=576, width=1024):
+        try:
+            if not HAS_FLUX:
+                return None, "FLUX not installed. Please run setup_demo1.sh"
+            
+            if not self.load_flux_pipeline():
+                return None, "Failed to load FLUX pipeline"
+            
+            style_prompts = {
+                "photorealistic": "photorealistic, highly detailed, sharp",
+                "oil-painting": "oil painting, brush strokes, artistic, vibrant colors",
+                "watercolor": "watercolor, soft, flowing, artistic, delicate",
+                "digital-art": "digital art, concept art, illustration, detailed, vibrant",
+                "3d-render": "3D render, CGI, professional, detailed, volumetric lighting"
+            }
+            
+            enhanced_prompt = f"{prompt}, {style_prompts.get(style, '')}"
+            
+            with torch.no_grad():
+                image = self.flux_pipe(
+                    prompt=enhanced_prompt,
+                    height=height,
+                    width=width,
+                    guidance_scale=0.0, # Schnell uses 0.0 guidance
+                    num_inference_steps=4
+                ).images[0]
+            
+            return image, f"✓ Image generated successfully! (Style: {style})"
+            
+        except Exception as e:
+            return None, f"Error: {str(e)}"
+    
+    def generate_text_to_video(self, image_input, prompt, duration=5.0, height=576, width=1024):
+        try:
+            if not HAS_SVD:
+                return None, "SVD not installed."
+            
+            if image_input is None:
+                return None, "Please upload an image first"
+            
+            if not self.load_svd_pipeline():
+                return None, "Failed to load SVD pipeline"
+            
+            if isinstance(image_input, str) and os.path.exists(image_input):
+                image = Image.open(image_input).convert("RGB")
+            elif isinstance(image_input, Image.Image):
+                image = image_input.convert("RGB")
+            else:
+                return None, "Invalid image input"
+            
+            image = image.resize((width, height))
+            num_frames = max(4, int(25 * (duration / 4.0)))
+            num_frames = min(25, num_frames)
+            
+            with torch.no_grad():
+                frames = self.svd_pipe(
+                    image=image,
+                    height=height,
+                    width=width,
+                    decode_chunk_size=8,
+                    generator=torch.manual_seed(42)
+                ).frames[0]
+            
+            video_path = os.path.join(self.temp_dir, f"video_{datetime.now().timestamp()}.mp4")
+            export_to_video(frames, video_path, fps=7)
+            
+            return video_path, f"✓ Video generated successfully!"
+            
+        except Exception as e:
+            return None, f"Error: {str(e)}"
+    
+    def generate_lip_sync(self, avatar_type, audio_input, text_input, voice_selection, emotion="neutral", intensity=50):
+        try:
+            self.unload_models() # Free VRAM
+            
+            # 1. Resolve Avatar Image
+            avatar_path = self.avatar_dict.get(avatar_type, "demo1/assets/female_avatar.png")
+            if not os.path.exists(avatar_path):
+                return None, f"Avatar file not found: {avatar_path}. Please re-run setup_assets or setup_demo1.", None
+            
+            # 2. Resolve Audio
+            audio_path = None
+            if audio_input is not None:
+                # Direct Upload Mode
+                if isinstance(audio_input, str) and os.path.exists(audio_input):
+                    audio_path = audio_input
+                elif isinstance(audio_input, tuple):
+                    sample_rate, audio_data = audio_input
+                    audio_path = os.path.join(self.temp_dir, f"uploaded_{datetime.now().timestamp()}.wav")
+                    import soundfile as sf
+                    sf.write(audio_path, audio_data, sample_rate)
+            else:
+                # Text-To-Speech Mode + OpenVoice Cloning
+                if not text_input:
+                    return None, "Please provide text for speech.", None
+                
+                temp_tts = os.path.join(self.temp_dir, f"base_tts_{datetime.now().timestamp()}.wav")
+                # Step A: Base TTS via edge-tts
+                import edge_tts
+                async def _gen():
+                    # Decide base voice roughly reflecting gender
+                    v_name = "en-US-AriaNeural" if "Female" in voice_selection else "en-US-GuyNeural"
+                    c = edge_tts.Communicate(text_input, v_name)
+                    await c.save(temp_tts)
+                asyncio.run(_gen())
+                
+                # Step B: Tone Color Cloning via OpenVoice
+                ref_audio = self.voice_dict.get(voice_selection, "demo1/assets/siri_female.wav")
+                if not os.path.exists(ref_audio):
+                    return None, f"Reference audio not found: {ref_audio}. Please re-run setup_demo1.", None
+                
+                cloned_audio = os.path.join(self.temp_dir, f"cloned_{datetime.now().timestamp()}.wav")
+                
+                # Create an isolated python script to run OpenVoice to avoid memory leaks
+                ov_script = f"""import sys, torch
 sys.path.append('demo1/OpenVoice')
 from openvoice import se_extractor
 from openvoice.api import ToneColorConverter
-try:
-    source_se, _ = se_extractor.get_se('{temp_tts}', ToneColorConverter, vad=True)
-    target_se, _ = se_extractor.get_se('{tts_clone_ref}', ToneColorConverter, vad=True)
-    ckpt = 'demo1/checkpoints/openvoice/checkpoints_v2/converter'
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    converter = ToneColorConverter(f'{{ckpt}}/config.json', device=device)
-    converter.load_ckpt(f'{{ckpt}}/checkpoint.pth')
-    converter.convert(
-        audio_src_path='{temp_tts}', src_se=source_se, tgt_se=target_se,
-        output_path='{cloned_audio}', message='default'
-    )
-except Exception as e:
-    with open('ov_err.txt', 'w') as f: f.write(str(e))
+
+source_se, _ = se_extractor.get_se('{temp_tts}', ToneColorConverter, vad=True)
+target_se, _ = se_extractor.get_se('{ref_audio}', ToneColorConverter, vad=True)
+
+converter = ToneColorConverter('demo1/checkpoints/openvoice/checkpoints_v2/converter/config.json', device='cuda' if torch.cuda.is_available() else 'cpu')
+converter.load_ckpt('demo1/checkpoints/openvoice/checkpoints_v2/converter/checkpoint.pth')
+converter.convert(
+    audio_src_path='{temp_tts}', src_se=source_se, tgt_se=target_se,
+    output_path='{cloned_audio}', message='default'
+)
 """
-            with open("demo1/temp_openvoice.py", "w") as f:
-                f.write(ov_script)
+                ov_script_path = os.path.join(self.temp_dir, "run_ov.py")
+                with open(ov_script_path, "w") as f:
+                    f.write(ov_script)
+                
+                result = subprocess.run(["python", ov_script_path], capture_output=True, text=True)
+                if os.path.exists(cloned_audio):
+                    audio_path = cloned_audio
+                else:
+                    return None, f"OpenVoice Error:\n{result.stderr}", None
             
-            res = subprocess.run(["python", "demo1/temp_openvoice.py"], capture_output=True, text=True)
-            if os.path.exists(cloned_audio):
-                final_audio = cloned_audio
-            else:
-                yield None, f"OpenVoice Error: {res.stderr}\nPlease check if checkpoints exist."
-                return
+            if audio_path is None:
+                return None, "Failed to resolve audio input.", None
 
-    # 3. Resolve SadTalker
-    yield None, "Generating Video (SadTalker) - This may take a few minutes..."
-    out_dir = os.path.join(tempfile.gettempdir(), "sadtalker_out")
+            # 3. Generate Lip Sync Video via SadTalker
+            out_dir = os.path.join(self.temp_dir, "sadtalker_out")
+            emotion_map = {"neutral": 0, "happy": 10, "sad": 20, "angry": 30, "excited": 40, "surprised": 25}
+            pose_style = emotion_map.get(emotion.lower(), 0)
+            
+            cmd = [
+                "python", "demo1/SadTalker/inference.py",
+                "--driven_audio", audio_path,
+                "--source_image", avatar_path,
+                "--result_dir", out_dir,
+                "--still",
+                "--preprocess", "full",
+                "--pose_style", str(pose_style),
+                "--expression_scale", str(intensity / 100.0)
+            ]
+            
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            
+            # Find Output Video
+            videos = glob.glob(f"{out_dir}/*/*.mp4")
+            if not videos:
+                return None, f"SadTalker Generation Failed. Log:\n{res.stderr[-500:]}", None
+                
+            latest_video = max(videos, key=os.path.getmtime)
+            
+            return latest_video, f"✓ Lip-sync video created! (Emotion: {emotion.title()}, Intensity: {intensity}%)", audio_path
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return None, f"Error: {str(e)}", None
+
+def create_demo():
+    studio = VDAMStudio()
     
-    # Map emotion to pose_style rough approximate (SadTalker pose styles are 0-45)
-    emotion_map = {"Neutral": 0, "Happy": 10, "Sad": 20, "Angry": 30, "Surprise": 40}
-    pose_style = emotion_map.get(emotion, 0)
-    
-    cmd = [
-        "python", "demo1/SadTalker/inference.py",
-        "--driven_audio", final_audio,
-        "--source_image", face_img,
-        "--result_dir", out_dir,
-        "--still",
-        "--preprocess", "full",
-        "--pose_style", str(pose_style),
-        "--expression_scale", str(intensity / 100.0)
-    ]
-    
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    
-    # 4. Find Output Video
-    videos = glob.glob(f"{out_dir}/*/*.mp4")
-    if not videos:
-        yield None, f"SadTalker Generation Failed. Log:\n{res.stderr[-500:]}"
-        return
+    with gr.Blocks(title="VDAM Studio Demo", theme=gr.themes.Soft(primary_hue="purple")) as demo:
+        gr.Markdown("""
+        # 🎬 VDAM Studio Demo
+        ## AI-Powered Content Creation & Animation
+        Create stunning visuals with FLUX, videos with SVD, and lip-sync avatars!
+        """)
         
-    latest_video = max(videos, key=os.path.getmtime)
-    yield latest_video, "Done!"
-
-# --- Gradio UI Layout ---
-
-with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue")) as demo:
-    gr.Markdown("# VDAM AI Studio - Demo 1")
-    gr.Markdown("Create highly realistic talking portraits and access text-to-image/video capabilities.")
-    
-    with gr.Tabs():
-        # TAB 1: Avatars
-        with gr.TabItem("Talking Avatar (Lip Sync)"):
-            with gr.Row():
-                with gr.Column(scale=1):
-                    gr.Markdown("### 1. Character Selection")
-                    avatar_type = gr.Radio(["Built-in Avatars", "Upload Avatar"], value="Built-in Avatars", label="Avatar Mode")
-                    builtin_avatar = gr.Dropdown(["Female Studio Avatar", "Male Studio Avatar"], value="Female Studio Avatar", label="Built-in Base")
-                    avatar_upload = gr.Image(type="filepath", label="Custom Avatar Image", visible=False)
+        with gr.Tabs():
+            with gr.Tab("🎬 Lip Sync"):
+                gr.Markdown("### Create Lip-Sync Videos with AI Avatars")
+                
+                with gr.Row():
+                    with gr.Column():
+                        gr.Markdown("#### Character Selection")
+                        avatar_type = gr.Dropdown(
+                            label="Select Avatar",
+                            choices=list(studio.avatar_dict.keys()),
+                            value="Female Studio Avatar"
+                        )
+                        
+                        gr.Markdown("#### Audio Input")
+                        audio_mode = gr.Radio(
+                            label="Audio Mode",
+                            choices=["Text-to-Speech", "Upload Audio"],
+                            value="Text-to-Speech"
+                        )
+                        
+                        tts_text = gr.Textbox(
+                            label="Text for Speech",
+                            placeholder="Enter text to convert to speech...",
+                            lines=3,
+                            visible=True
+                        )
+                        
+                        voice_selection = gr.Dropdown(
+                            label="Voice Identity",
+                            choices=list(studio.voice_dict.keys()),
+                            value="Alexa (Female)",
+                            visible=True
+                        )
+                        
+                        audio_upload = gr.Audio(
+                            label="Upload Audio File",
+                            type="filepath",
+                            visible=False
+                        )
+                        
+                        def update_audio_mode(mode):
+                            is_tts = mode == "Text-to-Speech"
+                            return (
+                                gr.Textbox(visible=is_tts),
+                                gr.Dropdown(visible=is_tts),
+                                gr.Audio(visible=not is_tts)
+                            )
+                        
+                        audio_mode.change(
+                            update_audio_mode,
+                            inputs=audio_mode,
+                            outputs=[tts_text, voice_selection, audio_upload]
+                        )
+                        
+                        gr.Markdown("#### Animation Settings")
+                        emotion = gr.Dropdown(
+                            label="Emotion",
+                            choices=["Neutral", "Happy", "Sad", "Angry", "Surprised", "Excited"],
+                            value="Neutral"
+                        )
+                        
+                        intensity = gr.Slider(
+                            label="Intensity (%)",
+                            minimum=0,
+                            maximum=100,
+                            value=50,
+                            step=10
+                        )
+                        
+                        lipsync_btn = gr.Button("🚀 Generate Lip-Sync Video", variant="primary")
                     
-                    gr.Markdown("### 2. Audio Input")
-                    audio_type = gr.Radio(
-                        ["Predefined Voice Sets", "Reference Audio for Cloning", "Direct Audio Mode"], 
-                        value="Predefined Voice Sets", label="Audio Generation Mode"
+                    with gr.Column():
+                        # Made outputs File/Video where appropriate
+                        lipsync_video = gr.Video(label="Video Preview")
+                        lipsync_status = gr.Textbox(label="Status", interactive=False)
+                        lipsync_audio = gr.Audio(label="Audio Output", interactive=False)
+                
+                def generate_lipsync(avatar, mode, text, voice, audio, emotion, intensity):
+                    audio_input = audio if mode == "Upload Audio" else None
+                    video_path, status, audio_path = studio.generate_lip_sync(
+                        avatar, audio_input, text, voice, emotion.lower(), intensity
                     )
-                    
-                    # TTS Inputs
-                    tts_text = gr.Textbox(lines=3, label="Text to Speak", value="Welcome to the V-DAM AI Studio demo.")
-                    tts_voice = gr.Dropdown(["Alexa (Female)", "Siri (Male)"], value="Alexa (Female)", label="Base Voice")
-                    tts_clone_ref = gr.Audio(type="filepath", label="Reference Audio (Voice to Clone)", visible=False)
-                    
-                    # Direct Input
-                    direct_audio_upload = gr.Audio(type="filepath", label="Direct Audio Upload (.wav/.mp3)", visible=False)
-                    
-                    gr.Markdown("### 3. Animation Settings")
-                    emotion = gr.Dropdown(["Neutral", "Happy", "Sad", "Angry", "Surprise"], value="Neutral", label="Emotion Style")
-                    intensity = gr.Slider(0, 100, value=100, step=1, label="Expression Intensity (%)")
-                    
-                    generate_btn = gr.Button("Generate Video", variant="primary")
-                    
-                with gr.Column(scale=1):
-                    output_video = gr.Video(label="AI Avatar Video Output")
-                    status_text = gr.Textbox(label="Status", interactive=False)
-                    
-            # UI Interactions
-            def update_avatar_view(choice):
-                return gr.update(visible=choice == "Upload Avatar"), gr.update(visible=choice == "Built-in Avatars")
-            
-            avatar_type.change(update_avatar_view, inputs=[avatar_type], outputs=[avatar_upload, builtin_avatar])
-            
-            def update_audio_view(choice):
-                return (
-                    gr.update(visible=choice in ["Predefined Voice Sets", "Reference Audio for Cloning"]), # text
-                    gr.update(visible=choice in ["Predefined Voice Sets", "Reference Audio for Cloning"]), # base voice
-                    gr.update(visible=choice == "Reference Audio for Cloning"), # target se
-                    gr.update(visible=choice == "Direct Audio Mode") # direct audio
+                    return video_path, status, audio_path
+                
+                lipsync_btn.click(
+                    generate_lipsync,
+                    inputs=[avatar_type, audio_mode, tts_text, voice_selection, audio_upload, emotion, intensity],
+                    outputs=[lipsync_video, lipsync_status, lipsync_audio]
                 )
-            audio_type.change(
-                update_audio_view, 
-                inputs=[audio_type], 
-                outputs=[tts_text, tts_voice, tts_clone_ref, direct_audio_upload]
-            )
             
-            generate_btn.click(
-                infer_lipsync,
-                inputs=[avatar_type, avatar_upload, builtin_avatar, audio_type, tts_text, tts_voice, tts_clone_ref, direct_audio_upload, emotion, intensity],
-                outputs=[output_video, status_text]
-            )
-
-        # TAB 2: T2I
-        with gr.TabItem("Text to Image (FLUX)"):
-            with gr.Row():
-                with gr.Column():
-                    flux_prompt = gr.Textbox(lines=4, label="Image Prompt", placeholder="Describe the image you want to generate...")
-                    flux_btn = gr.Button("Generate Image", variant="primary")
-                with gr.Column():
-                    flux_output = gr.Image(label="Generated Image")
-            flux_btn.click(infer_flux, inputs=[flux_prompt], outputs=[flux_output])
-
-        # TAB 3: T2V
-        with gr.TabItem("Text/Image to Video (SVD)"):
-            with gr.Row():
-                with gr.Column():
-                    svd_image = gr.Image(type="filepath", label="Source Image")
-                    svd_btn = gr.Button("Generate Video", variant="primary")
-                with gr.Column():
-                    svd_output = gr.Video(label="Generated Video Output")
-            svd_btn.click(infer_svd, inputs=[svd_image], outputs=[svd_output])
+            with gr.Tab("🖼️ Text to Image"):
+                gr.Markdown("### Generate Images from Text using FLUX")
+                
+                with gr.Row():
+                    with gr.Column():
+                        image_prompt = gr.Textbox(
+                            label="Image Prompt",
+                            placeholder="Describe the image you want to create...",
+                            lines=4
+                        )
+                        
+                        image_style = gr.Dropdown(
+                            label="Style",
+                            choices=["photorealistic", "oil-painting", "watercolor", "digital-art", "3d-render"],
+                            value="photorealistic"
+                        )
+                        
+                        with gr.Row():
+                            image_height = gr.Slider(
+                                label="Height",
+                                minimum=256,
+                                maximum=1024,
+                                value=576,
+                                step=64
+                            )
+                            image_width = gr.Slider(
+                                label="Width",
+                                minimum=256,
+                                maximum=1024,
+                                value=1024,
+                                step=64
+                            )
+                        
+                        image_btn = gr.Button("✨ Generate Image", variant="primary")
+                    
+                    with gr.Column():
+                        generated_image = gr.Image(label="Generated Image")
+                        image_status = gr.Textbox(label="Status", interactive=False)
+                
+                def generate_image(prompt, style, height, width):
+                    if not prompt or prompt.strip() == "":
+                        return None, "Please enter a prompt"
+                    image, status = studio.generate_text_to_image(
+                        prompt, style, height, width
+                    )
+                    return image, status
+                
+                image_btn.click(
+                    generate_image,
+                    inputs=[image_prompt, image_style, image_height, image_width],
+                    outputs=[generated_image, image_status]
+                )
+            
+            with gr.Tab("🎥 Text to Video"):
+                gr.Markdown("### Generate Videos from Images using SVD")
+                
+                with gr.Row():
+                    with gr.Column():
+                        gr.Markdown("#### Video Settings")
+                        video_image = gr.Image(
+                            label="Input Image",
+                            type="filepath"
+                        )
+                        
+                        video_prompt = gr.Textbox(
+                            label="Video Description (Unused in pure SVD but good for ref)",
+                            placeholder="Describe the video motion and style...",
+                            lines=3
+                        )
+                        
+                        video_duration = gr.Slider(
+                            label="Duration (seconds)",
+                            minimum=1,
+                            maximum=10,
+                            value=5,
+                            step=1
+                        )
+                        
+                        with gr.Row():
+                            video_height = gr.Slider(
+                                label="Height",
+                                minimum=256,
+                                maximum=1024,
+                                value=576,
+                                step=64
+                            )
+                            video_width = gr.Slider(
+                                label="Width",
+                                minimum=256,
+                                maximum=1024,
+                                value=1024,
+                                step=64
+                            )
+                        
+                        video_btn = gr.Button("🎬 Generate Video", variant="primary")
+                    
+                    with gr.Column():
+                        generated_video = gr.Video(label="Generated Video Output")
+                        video_status = gr.Textbox(label="Status", interactive=False)
+                
+                def generate_video(image, prompt, duration, height, width):
+                    if image is None:
+                        return None, "Please upload an image first"
+                    video_path, status = studio.generate_text_to_video(
+                        image, prompt, duration, height, width
+                    )
+                    return video_path, status
+                
+                video_btn.click(
+                    generate_video,
+                    inputs=[video_image, video_prompt, video_duration, video_height, video_width],
+                    outputs=[generated_video, video_status]
+                )
+            
+            with gr.Tab("ℹ️ About"):
+                gr.Markdown(f"""
+                ## VDAM Studio Demo
+                
+                ### Features:
+                - **Lip Sync**: Create lip-sync videos with OpenVoice cloning + SadTalker
+                - **Text to Image**: Generate stunning images from text descriptions using FLUX.1-schnell
+                - **Text to Video**: Create dynamic videos from images using open-source SVD
+                
+                ### Models Used:
+                - **OpenVoice V2**: Zero-shot high fidelity voice cloning
+                - **SadTalker**: Accurate facial emotion rendering
+                - **FLUX.1-schnell**: Top-tier text-to-image pipeline
+                - **SVD**: Stable Video Diffusion XT
+                """)
+    
+    return demo
 
 if __name__ == "__main__":
-    print("Pre-flight check: Make sure you ran setup_demo1.sh to install dependencies!")
+    demo = create_demo()
     demo.launch(share=True)
-
