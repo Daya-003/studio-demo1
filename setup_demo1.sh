@@ -1,60 +1,57 @@
 #!/bin/bash
-# setup_demo1.sh - Install OpenVoice + SadTalker for VDAM Studio Demo
-# MIT License Compliant - Commercial Use OK
+# setup_demo1.sh - Setup script for VDAM AI Studio Demo 1
+# This script configures the environment, downloads necessary models for
+# OpenVoice and SadTalker, and generates base assets for the UI.
+# Run this from the root `vdam` directory as: bash demo1/setup_demo1.sh
 
-echo "🚀 Setting up VDAM Studio Demo 1: OpenVoice + SadTalker..."
+echo ">>> Setting up VDAM AI Studio Demo 1..."
 
-# Create virtual environment
-python -m venv vdam_demo1_env
-source vdam_demo1_env/bin/activate  # Linux/Mac
-# On Windows: vdam_demo1_env\Scripts\activate
+# 1. Python Dependencies
+echo ">>> Installing Python Packages..."
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install transformers diffusers accelerate gradio edge-tts scipy moviepy
+pip install safetensors huggingface_hub
 
-# Upgrade pip
-pip install --upgrade pip
+# 2. Clone Repositories
+echo ">>> Cloning Repositories..."
+mkdir -p demo1/checkpoints
+mkdir -p demo1/assets
 
-# Install PyTorch (CPU for demo, GPU optional)
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+if [ ! -d "demo1/SadTalker" ]; then
+    echo "Cloning SadTalker..."
+    git clone https://github.com/OpenTalker/SadTalker.git demo1/SadTalker
+    pip install -r demo1/SadTalker/requirements.txt
+fi
 
-# Install core dependencies
-pip install gradio==4.44.0
-pip install librosa==0.10.1
-pip install numpy==1.26.4
-pip install gradio_client==1.2.0
+if [ ! -d "demo1/OpenVoice" ]; then
+    echo "Cloning OpenVoice..."
+    git clone https://github.com/myshell-ai/OpenVoice.git demo1/OpenVoice
+    pip install -r demo1/OpenVoice/requirements.txt
+    # MeloTTS for OpenVoice V2
+    pip install git+https://github.com/myshell-ai/MeloTTS.git
+    python -m unidic download
+fi
 
-# Install OpenVoice (MIT License)
-cd /tmp
-git clone https://github.com/myshell-ai/OpenVoice
-cd OpenVoice
-pip install -e .
-pip install nltk
-python -c "import nltk; nltk.download('punkt')"
+# 3. Download Checkpoints
+echo ">>> Downloading OpenVoice Checkpoints..."
+mkdir -p demo1/checkpoints/openvoice
+if [ ! -f "demo1/checkpoints/openvoice/checkpoints_v2.zip" ]; then
+    wget -q https://myshell-public-repo-hosting.s3.amazonaws.com/openvoice/checkpoints_v2_0417.zip -O demo1/checkpoints/openvoice/checkpoints_v2.zip
+    # Use standard unzip
+    unzip -o demo1/checkpoints/openvoice/checkpoints_v2.zip -d demo1/checkpoints/openvoice/
+fi
 
-# Install SadTalker (MIT License)
-cd /tmp
-git clone https://github.com/OpenTalker/SadTalker.git
-cd SadTalker
-pip install -r requirements.txt
-pip install onnxruntime  # CPU inference
-pip install gfpgan
-pip install basicsr
+echo ">>> Downloading SadTalker Checkpoints..."
+if [ ! -d "demo1/SadTalker/checkpoints" ] || [ -z "$(ls -A demo1/SadTalker/checkpoints)" ]; then
+    pushd demo1/SadTalker
+    bash scripts/download_models.sh
+    popd
+fi
 
-# Create demo directory
-mkdir -p ~/vdam_studio_demo1
-cd ~/vdam_studio_demo1
+# 4. Generate Reference Audio Assets
+echo ">>> Generating Base Audio References using edge-tts..."
+edge-tts --text "Hello there! This is a predefined reference voice sample for your virtual AI studio demo. You can use it as a base for voice cloning or lip syncing." --voice en-US-AriaNeural --write-media demo1/assets/siri_female.wav
+edge-tts --text "Hello there! This is a predefined reference voice sample for your virtual AI studio demo. You can use it as a base for voice cloning or lip syncing." --voice en-US-GuyNeural --write-media demo1/assets/alexa_male.wav
 
-# Download pretrained models (MIT compliant)
-echo "📥 Downloading pretrained models..."
+echo ">>> Demo 1 setup complete! You can now run: python demo1/app_demo1.py"
 
-# OpenVoice models
-mkdir -p checkpoints_v2
-wget -O checkpoints_v2/vocab.txt https://huggingface.co/myshell-ai/OpenVoice/resolve/main/checkpoints_v2/vocab.txt
-wget -O checkpoints_v2/config.json https://huggingface.co/myshell-ai/OpenVoice/resolve/main/checkpoints_v2/config.json
-wget -O checkpoints_v2/openvoice_2024-05-04.pth https://huggingface.co/myshell-ai/OpenVoice/resolve/main/checkpoints_v2/openvoice_2024-05-04.pth
-
-# SadTalker models
-mkdir -p sadtalker_checkpoints
-wget -O sadtalker_checkpoints/whole_body.pth https://github.com/OpenTalker/SadTalker/releases/download/v0.0.2-rc/whole_body.pth
-wget -O sadtalker_checkpoints/wav2lip_gan.pth https://github.com/OpenTalker/SadTalker/releases/download/v0.0.2-rc/wav2lip_gan.pth
-
-echo "✅ Setup complete! Run: cd ~/vdam_studio_demo1 && python app_demo1.py"
-echo "💡 For GPU support, reinstall PyTorch with CUDA: pip install torch --index-url https://download.pytorch.org/whl/cu121"
