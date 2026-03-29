@@ -12,11 +12,15 @@ import sys
 def download_default_assets():
     """Automatically fetch fallback images and voice files from Open Source repos"""
     os.makedirs("assets", exist_ok=True)
-    images = {
+    assets = {
         "woman_avatar.png": "https://raw.githubusercontent.com/OpenTalker/SadTalker/main/examples/source_image/art_1.png",
         "man_avatar.png": "https://raw.githubusercontent.com/OpenTalker/SadTalker/main/examples/source_image/art_2.png",
+        "alexa_female_voice.wav": "https://raw.githubusercontent.com/OpenTalker/SadTalker/main/examples/driven_audio/RD_Radio31_000.wav",
+        "alexa_male_voice.wav": "https://raw.githubusercontent.com/OpenTalker/SadTalker/main/examples/driven_audio/macron.wav",
+        "siri_female_voice.wav": "https://raw.githubusercontent.com/OpenTalker/SadTalker/main/examples/driven_audio/bus_chinese.wav",
+        "siri_male_voice.wav": "https://raw.githubusercontent.com/OpenTalker/SadTalker/main/examples/driven_audio/japanese.wav"
     }
-    for filename, url in images.items():
+    for filename, url in assets.items():
         filepath = os.path.join("assets", filename)
         if not os.path.exists(filepath):
             print(f"Downloading default asset: {filename}...")
@@ -24,24 +28,15 @@ def download_default_assets():
                 urllib.request.urlretrieve(url, filepath)
             except Exception as e:
                 print(f"Failed to download {filename}: {e}")
-                
-    # Generate default voices if missing
-    alexa_path = os.path.join("assets", "alexa_voice.wav")
-    if not os.path.exists(alexa_path):
-        subprocess.run(['powershell', '-Command', 
-            "Add-Type -AssemblyName System.Speech; $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer; $synth.SetOutputToWaveFile('" + os.path.abspath(alexa_path) + "'); $synth.Speak('Hello, welcome to VDAM A1 Asset AI Studio.'); $synth.Dispose()"])
-            
-    siri_path = os.path.join("assets", "siri_voice.wav")
-    if not os.path.exists(siri_path):
-        subprocess.run(['powershell', '-Command', 
-            "Add-Type -AssemblyName System.Speech; $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer; $synth.SetOutputToWaveFile('" + os.path.abspath(siri_path) + "'); $synth.SelectVoiceByHints('Female'); $synth.Speak('Hi! Welcome to VDAM A1 Asset AI Studio.'); $synth.Dispose()"])
 
 download_default_assets()
 
 DEFAULT_WOMAN_AVATAR = os.path.abspath("assets/woman_avatar.png")
 DEFAULT_MAN_AVATAR = os.path.abspath("assets/man_avatar.png")
-DEFAULT_ALEXA_VOICE = os.path.abspath("assets/alexa_voice.wav")
-DEFAULT_SIRI_VOICE = os.path.abspath("assets/siri_voice.wav")
+DEFAULT_ALEXA_FEMALE = os.path.abspath("assets/alexa_female_voice.wav")
+DEFAULT_ALEXA_MALE = os.path.abspath("assets/alexa_male_voice.wav")
+DEFAULT_SIRI_FEMALE = os.path.abspath("assets/siri_female_voice.wav")
+DEFAULT_SIRI_MALE = os.path.abspath("assets/siri_male_voice.wav")
 
 # -------------------------------------------------------------
 # AI Pipeline Execution
@@ -70,10 +65,14 @@ def generate_video(
         if not text_input or not text_input.strip():
             return None, "Error: Enter Text-to-Speech prompt."
             
-        if builtin_voice == "Alexa (Preset)":
-            ref_audio = DEFAULT_ALEXA_VOICE
-        elif builtin_voice == "Siri (Preset)":
-            ref_audio = DEFAULT_SIRI_VOICE
+        if builtin_voice == "Alexa (Female)":
+            ref_audio = DEFAULT_ALEXA_FEMALE
+        elif builtin_voice == "Alexa (Male)":
+            ref_audio = DEFAULT_ALEXA_MALE
+        elif builtin_voice == "Siri (Female)":
+            ref_audio = DEFAULT_SIRI_FEMALE
+        elif builtin_voice == "Siri (Male)":
+            ref_audio = DEFAULT_SIRI_MALE
         else:
             if not custom_voice: return None, "Error: Upload reference audio for cloning."
             ref_audio = os.path.abspath(custom_voice)
@@ -155,9 +154,12 @@ except Exception as e:
     result_dir = os.path.abspath("./results_demo1")
     os.makedirs(result_dir, exist_ok=True)
     
-    # Emotion Mapping
-    emotion_map = {"Neutral": 0, "Happy": 10, "Serious": 20, "Surprise": 30}
+    # Emotion Mapping (mimicking styles using pose interpolation IDs native to SadTalker logic)
+    emotion_map = {"Happy": 10, "Sad": 20, "Angry": 30, "Surprise": 40}
     pose_style = emotion_map.get(emotion_type, 0)
+    
+    # Scale Intensity from 0-100% slider to SadTalker expression_scale (~1.0 is normal, 2.0 is highly exaggerated)
+    exp_scale = 1.0 + (emotion_intensity / 100.0)
     
     sadtalker_path = os.path.abspath("SadTalker/inference.py")
     if not os.path.exists(sadtalker_path):
@@ -172,7 +174,7 @@ except Exception as e:
         "--preprocess", "crop",
         # NOTE: GFPGAN REMOVED FOR COMMERCIAL COMPLIANCE
         "--pose_style", str(pose_style),
-        "--expression_scale", str(emotion_intensity)
+        "--expression_scale", str(exp_scale)
     ]
     
     try:
@@ -205,12 +207,7 @@ with gr.Blocks(title="VDAM Demo 1: Expressive Cloner", theme=gr.themes.Soft()) a
             preview_avatar = gr.Image(value=DEFAULT_WOMAN_AVATAR, label="Preview Predefined", interactive=False, height=200)
             
             # Custom Upload
-            custom_avatar = gr.Image(
-                label="Upload Custom Image File", 
-                type="filepath", 
-                visible=False,
-                info="Ensure the mouth is closed and the lighting is even."
-            )
+            custom_avatar = gr.Image(label="Upload Custom Image File", type="filepath", visible=False)
             
             def update_avatar_preview(selected):
                 img_path = DEFAULT_WOMAN_AVATAR if "Woman" in selected else DEFAULT_MAN_AVATAR
@@ -229,38 +226,32 @@ with gr.Blocks(title="VDAM Demo 1: Expressive Cloner", theme=gr.themes.Soft()) a
             
             # TTS Group
             with gr.Group() as tts_group:
-                text_input = gr.Textbox(
-                    label="Text Prompt", 
-                    value="Hello, welcome to VDAM A1 Asset AI Studio.",
-                    placeholder="Type what the avatar should say...", 
-                    lines=2
-                )
+                text_input = gr.Textbox(label="Text Prompt", placeholder="Type what the avatar should say...", lines=2)
                 gr.Markdown("Select a voice to clone (OpenVoice V2):")
-                builtin_voice = gr.Radio(["Alexa (Preset)", "Siri (Preset)", "Upload Custom reference"], label="Voice Target", value="Alexa (Preset)")
+                builtin_voice = gr.Radio(
+                    ["Alexa (Female)", "Alexa (Male)", "Siri (Female)", "Siri (Male)", "Upload Custom reference"], 
+                    label="Voice Target", 
+                    value="Alexa (Female)"
+                )
                 
                 # Hidden audio player for preset preview
-                preset_voice_preview = gr.Audio(value=DEFAULT_ALEXA_VOICE, interactive=False, label="Voice Preview")
-                custom_voice = gr.Audio(
-                    label="Upload your voice (WAV/MP3)", 
-                    type="filepath", 
-                    visible=False,
-                    info="Record or let user upload a 10-second clean audio clip of someone speaking (no background noise)."
-                )
+                preset_voice_preview = gr.Audio(value=DEFAULT_ALEXA_FEMALE, interactive=False, label="Voice Preview")
+                custom_voice = gr.Audio(label="Upload your voice (WAV/MP3)", type="filepath", visible=False)
                 
                 def update_voice_preview(choice):
                     is_custom = choice == "Upload Custom reference"
-                    default_audio = DEFAULT_ALEXA_VOICE if choice == "Alexa (Preset)" else DEFAULT_SIRI_VOICE
+                    if choice == "Alexa (Female)": default_audio = DEFAULT_ALEXA_FEMALE
+                    elif choice == "Alexa (Male)": default_audio = DEFAULT_ALEXA_MALE
+                    elif choice == "Siri (Female)": default_audio = DEFAULT_SIRI_FEMALE
+                    elif choice == "Siri (Male)": default_audio = DEFAULT_SIRI_MALE
+                    else: default_audio = DEFAULT_ALEXA_FEMALE
                     return gr.update(visible=is_custom), gr.update(visible=not is_custom, value=default_audio)
                 
                 builtin_voice.change(fn=update_voice_preview, inputs=builtin_voice, outputs=[custom_voice, preset_voice_preview])
                 
             # Direct Audio Group
             with gr.Group(visible=False) as direct_audio_group:
-                direct_audio = gr.Audio(
-                    label="Upload spoken audio file", 
-                    type="filepath",
-                    info="Record or let user upload a 10-second clean audio clip of someone speaking (no background noise)."
-                )
+                direct_audio = gr.Audio(label="Upload spoken audio file", type="filepath")
                 
             def toggle_audio_mode(mode):
                 is_tts = (mode == "Text-to-Speech Mode")
@@ -271,15 +262,15 @@ with gr.Blocks(title="VDAM Demo 1: Expressive Cloner", theme=gr.themes.Soft()) a
         with gr.Column(scale=1):
             gr.Markdown("### 3. Animation Settings")
             emotion_type = gr.Dropdown(
-                ["Neutral", "Happy", "Serious", "Surprise"], 
+                ["Happy", "Sad", "Angry", "Surprise"], 
                 label="Emotion Style", 
-                value="Neutral",
-                info="SadTalker base pose style"
+                value="Happy",
+                info="Mapping to pose styles (e.g. Happy, Sad, Angry, Surprise)"
             )
             emotion_intensity = gr.Slider(
-                minimum=1, maximum=100, value=1.0, step=0.1, 
+                minimum=0, maximum=100, value=0, step=1, 
                 label="Emotion Intensity (%)", 
-                info="1.0 is Normal, higher is more exaggerated."
+                info="0% is normal scaling. Up to 100% exaggeration."
             )
             
             generate_btn = gr.Button("🚀 Generate Demo 1 Video", variant="primary", size="lg")
