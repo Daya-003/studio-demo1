@@ -12,99 +12,108 @@ from datetime import datetime
 import subprocess
 import glob
 
-sys.path.append('demo1/OpenVoice')
-sys.path.append('demo1/SadTalker')
+# Ensure SadTalker and OpenVoice paths relative to script location
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+vdam_root = os.path.dirname(BASE_DIR)
+sys.path.append(os.path.join(BASE_DIR, 'OpenVoice'))
+sys.path.append(os.path.join(BASE_DIR, 'SadTalker'))
 
-HAS_FLUX = False
-HAS_SVD = False
-
+HAS_DIFFUSERS = False
 try:
-    from diffusers import FluxPipeline
-    HAS_FLUX = True
-except:
-    pass
-
-try:
-    from diffusers import StableVideoDiffusionPipeline
+    from diffusers import PixArtAlphaPipeline, DiffusionPipeline
     from diffusers.utils import export_to_video
-    HAS_SVD = True
-except:
+    HAS_DIFFUSERS = True
+except ImportError:
     pass
 
 class VDAMStudio:
     def __init__(self):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
-        self.flux_pipe = None
-        self.svd_pipe = None
+        self.dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+        self.t2i_pipe = None
+        self.t2v_pipe = None
         self.temp_dir = tempfile.mkdtemp()
         
-        # Ensure directories exist
-        os.makedirs("demo1/assets", exist_ok=True)
-        os.makedirs("demo1/checkpoints/openvoice", exist_ok=True)
+        # Absolute paths based on this script's directory (demo1/)
+        self.assets_dir = os.path.join(BASE_DIR, "assets")
+        self.checkpoints_dir = os.path.join(BASE_DIR, "checkpoints")
         
-        # Base avatars and reference audio must exist or be created
+        os.makedirs(self.assets_dir, exist_ok=True)
+        os.makedirs(self.checkpoints_dir, exist_ok=True)
+        
         self.avatar_dict = {
-            "Female Studio Avatar": "assets/female_avatar.png",
-            "Male Studio Avatar": "assets/male_avatar.png",
+            "Female Studio Avatar": os.path.join(self.assets_dir, "female_avatar.png"),
+            "Male Studio Avatar": os.path.join(self.assets_dir, "male_avatar.png"),
         }
         
         self.voice_dict = {
-            "Alexa (Female)": "demo1/assets/siri_female.wav",
-            "Siri (Male)": "demo1/assets/alexa_male.wav",
+            "Alexa (Female)": os.path.join(self.assets_dir, "siri_female.wav"),
+            "Siri (Male)": os.path.join(self.assets_dir, "alexa_male.wav"),
         }
     
     def unload_models(self):
         """Free VRAM by unloading diffusers models."""
-        if self.flux_pipe is not None:
-            del self.flux_pipe
-            self.flux_pipe = None
-        if self.svd_pipe is not None:
-            del self.svd_pipe
-            self.svd_pipe = None
+        if self.t2i_pipe is not None:
+            del self.t2i_pipe
+            self.t2i_pipe = None
+        if self.t2v_pipe is not None:
+            del self.t2v_pipe
+            self.t2v_pipe = None
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             
-    def load_flux_pipeline(self):
-        if self.flux_pipe is None:
+    def load_pixart_pipeline(self):
+        if self.t2i_pipe is None:
             try:
                 self.unload_models()
-                print("Loading FLUX pipeline...")
-                self.flux_pipe = FluxPipeline.from_pretrained(
-                    "black-forest-labs/FLUX.1-schnell", # Use schnell for free commercial use & speed
-                    torch_dtype=self.dtype
+                print("Loading PixArt-alpha pipeline...")
+                self.t2i_pipe = PixArtAlphaPipeline.from_pretrained(
+                    "PixArt-alpha/PixArt-XL-2-1024-MS", 
+                    torch_dtype=self.dtype,
+                    use_safetensors=True
                 )
-                self.flux_pipe = self.flux_pipe.to(self.device)
-                print("FLUX pipeline loaded successfully!")
+                self.t2i_pipe.enable_model_cpu_offload()
+                print("PixArt-alpha pipeline loaded successfully!")
             except Exception as e:
-                print(f"Error loading FLUX: {e}")
+                print(f"Error loading PixArt: {e}")
                 return False
         return True
     
-    def load_svd_pipeline(self):
-        if self.svd_pipe is None:
+    def load_longcat_pipeline(self):
+        if self.t2v_pipe is None:
             try:
                 self.unload_models()
-                print("Loading SVD pipeline...")
-                self.svd_pipe = StableVideoDiffusionPipeline.from_pretrained(
-                    "stabilityai/stable-video-diffusion-img2vid-xt",
-                    torch_dtype=torch.float16, variant="fp16"
+                print("Loading LongCat Video pipeline...")
+                self.t2v_pipe = DiffusionPipeline.from_pretrained(
+                    "FastVideo/LongCat-Video-T2V-Diffusers",
+                    torch_dtype=torch.float16
                 )
                 if torch.cuda.is_available():
-                    self.svd_pipe.enable_model_cpu_offload()
-                print("SVD pipeline loaded successfully!")
+                    self.t2v_pipe.enable_model_cpu_offload()
+                print("LongCat Video pipeline loaded successfully!")
             except Exception as e:
-                print(f"Error loading SVD: {e}")
-                return False
+                print(f"Error loading LongCat: {e}")
+                print("Attempting fallback to standard Text-to-Video Model...")
+                try:
+                    from diffusers import TextToVideoSDPipeline
+                    self.t2v_pipe = TextToVideoSDPipeline.from_pretrained(
+                        "damo-vilab/text-to-video-ms-1.7b", torch_dtype=torch.float16
+                    )
+                    if torch.cuda.is_available():
+                        self.t2v_pipe.enable_model_cpu_offload()
+                    print("Fallback T2V pipeline loaded successfully!")
+                except Exception as e2:
+                    print(f"Fallback also failed: {e2}")
+                    return False
         return True
     
     def generate_text_to_image(self, prompt, style="photorealistic", height=576, width=1024):
         try:
-            if not HAS_FLUX:
-                return None, "FLUX not installed. Please run setup_demo1.sh"
+            if not HAS_DIFFUSERS:
+                return None, "diffusers not installed."
             
-            if not self.load_flux_pipeline():
-                return None, "Failed to load FLUX pipeline"
+            if not self.load_pixart_pipeline():
+                return None, "Failed to load PixArt pipeline"
             
             style_prompts = {
                 "photorealistic": "photorealistic, highly detailed, sharp",
@@ -117,12 +126,12 @@ class VDAMStudio:
             enhanced_prompt = f"{prompt}, {style_prompts.get(style, '')}"
             
             with torch.no_grad():
-                image = self.flux_pipe(
+                image = self.t2i_pipe(
                     prompt=enhanced_prompt,
                     height=height,
                     width=width,
-                    guidance_scale=0.0, # Schnell uses 0.0 guidance
-                    num_inference_steps=4
+                    guidance_scale=4.5,
+                    num_inference_steps=20
                 ).images[0]
             
             return image, f"✓ Image generated successfully! (Style: {style})"
@@ -130,51 +139,58 @@ class VDAMStudio:
         except Exception as e:
             return None, f"Error: {str(e)}"
     
-    def generate_text_to_video(self, image_input, prompt, duration=5.0, height=576, width=1024):
+    def generate_video(self, video_prompt, image_input=None, duration=5.0, height=320, width=512):
         try:
-            if not HAS_SVD:
-                return None, "SVD not installed."
+            if not HAS_DIFFUSERS:
+                return None, "diffusers not installed."
             
-            if image_input is None:
-                return None, "Please upload an image first"
+            if not video_prompt or video_prompt.strip() == "":
+                return None, "Please enter a video description prompt"
             
-            if not self.load_svd_pipeline():
-                return None, "Failed to load SVD pipeline"
+            if not self.load_longcat_pipeline():
+                return None, "Failed to load LongCat/T2V pipeline"
             
-            if isinstance(image_input, str) and os.path.exists(image_input):
-                image = Image.open(image_input).convert("RGB")
-            elif isinstance(image_input, Image.Image):
-                image = image_input.convert("RGB")
-            else:
-                return None, "Invalid image input"
-            
-            image = image.resize((width, height))
-            num_frames = max(4, int(25 * (duration / 4.0)))
-            num_frames = min(25, num_frames)
+            num_frames = max(8, int(16 * (duration / 4.0)))
+            num_frames = min(32, num_frames) # Keep it reasonable to prevent taking >4mins
             
             with torch.no_grad():
-                frames = self.svd_pipe(
-                    image=image,
-                    height=height,
-                    width=width,
-                    decode_chunk_size=8,
-                    generator=torch.manual_seed(42)
-                ).frames[0]
+                # We attempt purely text-to-video first as requested.
+                # If image exists, maybe merge logic, but user wanted T2V.
+                kwargs = {
+                    "prompt": video_prompt,
+                    "height": height,
+                    "width": width,
+                    "num_frames": num_frames,
+                    "num_inference_steps": 25
+                }
+                
+                # if the pipeline has an 'image' kwarg and image_input is passed
+                if image_input and "image" in self.t2v_pipe.__call__.__code__.co_varnames:
+                    if isinstance(image_input, str):
+                        img = Image.open(image_input).convert("RGB")
+                    else:
+                        img = image_input.convert("RGB")
+                    kwargs["image"] = img.resize((width, height))
+                
+                output = self.t2v_pipe(**kwargs)
+                frames = output.frames[0]
             
             video_path = os.path.join(self.temp_dir, f"video_{datetime.now().timestamp()}.mp4")
-            export_to_video(frames, video_path, fps=7)
+            export_to_video(frames, video_path, fps=8)
             
             return video_path, f"✓ Video generated successfully!"
             
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             return None, f"Error: {str(e)}"
     
     def generate_lip_sync(self, avatar_type, audio_input, text_input, voice_selection, emotion="neutral", intensity=50):
         try:
             self.unload_models() # Free VRAM
             
-            # 1. Resolve Avatar Image
-            avatar_path = self.avatar_dict.get(avatar_type, "demo1/assets/female_avatar.png")
+            # 1. Resolve Avatar Image (absolute paths)
+            avatar_path = self.avatar_dict.get(avatar_type, os.path.join(self.assets_dir, "female_avatar.png"))
             if not os.path.exists(avatar_path):
                 return None, f"Avatar file not found: {avatar_path}. Please re-run setup_assets or setup_demo1.", None
             
@@ -195,7 +211,6 @@ class VDAMStudio:
                     return None, "Please provide text for speech.", None
                 
                 temp_tts = os.path.join(self.temp_dir, f"base_tts_{datetime.now().timestamp()}.wav")
-                # Step A: Base TTS via edge-tts
                 import edge_tts
                 async def _gen():
                     # Decide base voice roughly reflecting gender
@@ -204,33 +219,37 @@ class VDAMStudio:
                     await c.save(temp_tts)
                 asyncio.run(_gen())
                 
-                # Step B: Tone Color Cloning via OpenVoice
-                ref_audio = self.voice_dict.get(voice_selection, "demo1/assets/siri_female.wav")
+                ref_audio = self.voice_dict.get(voice_selection, os.path.join(self.assets_dir, "siri_female.wav"))
                 if not os.path.exists(ref_audio):
                     return None, f"Reference audio not found: {ref_audio}. Please re-run setup_demo1.", None
                 
                 cloned_audio = os.path.join(self.temp_dir, f"cloned_{datetime.now().timestamp()}.wav")
                 
-                # Create an isolated python script to run OpenVoice to avoid memory leaks
+                ov_ckpt_dir = os.path.join(self.checkpoints_dir, "openvoice", "checkpoints_v2", "converter")
                 ov_script = f"""import sys, torch
-sys.path.append('demo1/OpenVoice')
+sys.path.append(r'{os.path.join(BASE_DIR, "OpenVoice")}')
 from openvoice import se_extractor
 from openvoice.api import ToneColorConverter
 
-source_se, _ = se_extractor.get_se('{temp_tts}', ToneColorConverter, vad=True)
-target_se, _ = se_extractor.get_se('{ref_audio}', ToneColorConverter, vad=True)
+try:
+    source_se, _ = se_extractor.get_se(r'{temp_tts}', ToneColorConverter, vad=True)
+    target_se, _ = se_extractor.get_se(r'{ref_audio}', ToneColorConverter, vad=True)
 
-converter = ToneColorConverter('demo1/checkpoints/openvoice/checkpoints_v2/converter/config.json', device='cuda' if torch.cuda.is_available() else 'cpu')
-converter.load_ckpt('demo1/checkpoints/openvoice/checkpoints_v2/converter/checkpoint.pth')
-converter.convert(
-    audio_src_path='{temp_tts}', src_se=source_se, tgt_se=target_se,
-    output_path='{cloned_audio}', message='default'
-)
+    converter = ToneColorConverter(r'{os.path.join(ov_ckpt_dir, "config.json")}', device='cuda' if torch.cuda.is_available() else 'cpu')
+    converter.load_ckpt(r'{os.path.join(ov_ckpt_dir, "checkpoint.pth")}')
+    converter.convert(
+        audio_src_path=r'{temp_tts}', src_se=source_se, tgt_se=target_se,
+        output_path=r'{cloned_audio}', message='default'
+    )
+except Exception as e:
+    with open(r'{os.path.join(self.temp_dir, "ov_err.txt")}', "w") as f:
+        f.write(str(e))
 """
                 ov_script_path = os.path.join(self.temp_dir, "run_ov.py")
                 with open(ov_script_path, "w") as f:
                     f.write(ov_script)
                 
+                # Execute openvoice in a child process
                 result = subprocess.run(["python", ov_script_path], capture_output=True, text=True)
                 if os.path.exists(cloned_audio):
                     audio_path = cloned_audio
@@ -245,8 +264,9 @@ converter.convert(
             emotion_map = {"neutral": 0, "happy": 10, "sad": 20, "angry": 30, "excited": 40, "surprised": 25}
             pose_style = emotion_map.get(emotion.lower(), 0)
             
+            sadtalker_inf = os.path.join(BASE_DIR, "SadTalker", "inference.py")
             cmd = [
-                "python", "demo1/SadTalker/inference.py",
+                "python", sadtalker_inf,
                 "--driven_audio", audio_path,
                 "--source_image", avatar_path,
                 "--result_dir", out_dir,
@@ -258,7 +278,6 @@ converter.convert(
             
             res = subprocess.run(cmd, capture_output=True, text=True)
             
-            # Find Output Video
             videos = glob.glob(f"{out_dir}/*/*.mp4")
             if not videos:
                 return None, f"SadTalker Generation Failed. Log:\n{res.stderr[-500:]}", None
@@ -279,7 +298,7 @@ def create_demo():
         gr.Markdown("""
         # 🎬 VDAM Studio Demo
         ## AI-Powered Content Creation & Animation
-        Create stunning visuals with FLUX, videos with SVD, and lip-sync avatars!
+        Create stunning visuals with PixArt-α, videos with LongCat/T2V, and lip-sync avatars!
         """)
         
         with gr.Tabs():
@@ -345,26 +364,19 @@ def create_demo():
                         
                         intensity = gr.Slider(
                             label="Intensity (%)",
-                            minimum=0,
-                            maximum=100,
-                            value=50,
-                            step=10
+                            minimum=0, maximum=100, value=50, step=10
                         )
                         
                         lipsync_btn = gr.Button("🚀 Generate Lip-Sync Video", variant="primary")
                     
                     with gr.Column():
-                        # Made outputs File/Video where appropriate
                         lipsync_video = gr.Video(label="Video Preview")
                         lipsync_status = gr.Textbox(label="Status", interactive=False)
                         lipsync_audio = gr.Audio(label="Audio Output", interactive=False)
                 
                 def generate_lipsync(avatar, mode, text, voice, audio, emotion, intensity):
                     audio_input = audio if mode == "Upload Audio" else None
-                    video_path, status, audio_path = studio.generate_lip_sync(
-                        avatar, audio_input, text, voice, emotion.lower(), intensity
-                    )
-                    return video_path, status, audio_path
+                    return studio.generate_lip_sync(avatar, audio_input, text, voice, emotion.lower(), intensity)
                 
                 lipsync_btn.click(
                     generate_lipsync,
@@ -373,7 +385,7 @@ def create_demo():
                 )
             
             with gr.Tab("🖼️ Text to Image"):
-                gr.Markdown("### Generate Images from Text using FLUX")
+                gr.Markdown("### Generate Images from Text using PixArt-α")
                 
                 with gr.Row():
                     with gr.Column():
@@ -390,20 +402,8 @@ def create_demo():
                         )
                         
                         with gr.Row():
-                            image_height = gr.Slider(
-                                label="Height",
-                                minimum=256,
-                                maximum=1024,
-                                value=576,
-                                step=64
-                            )
-                            image_width = gr.Slider(
-                                label="Width",
-                                minimum=256,
-                                maximum=1024,
-                                value=1024,
-                                step=64
-                            )
+                            image_height = gr.Slider(label="Height", minimum=256, maximum=1024, value=512, step=64)
+                            image_width = gr.Slider(label="Width", minimum=256, maximum=1024, value=512, step=64)
                         
                         image_btn = gr.Button("✨ Generate Image", variant="primary")
                     
@@ -414,10 +414,7 @@ def create_demo():
                 def generate_image(prompt, style, height, width):
                     if not prompt or prompt.strip() == "":
                         return None, "Please enter a prompt"
-                    image, status = studio.generate_text_to_image(
-                        prompt, style, height, width
-                    )
-                    return image, status
+                    return studio.generate_text_to_image(prompt, style, height, width)
                 
                 image_btn.click(
                     generate_image,
@@ -426,45 +423,27 @@ def create_demo():
                 )
             
             with gr.Tab("🎥 Text to Video"):
-                gr.Markdown("### Generate Videos from Images using SVD")
+                gr.Markdown("### Generate Videos using LongCat / T2V Model")
                 
                 with gr.Row():
                     with gr.Column():
                         gr.Markdown("#### Video Settings")
-                        video_image = gr.Image(
-                            label="Input Image",
-                            type="filepath"
-                        )
-                        
                         video_prompt = gr.Textbox(
-                            label="Video Description (Unused in pure SVD but good for ref)",
+                            label="Video Description (Required)",
                             placeholder="Describe the video motion and style...",
                             lines=3
                         )
                         
-                        video_duration = gr.Slider(
-                            label="Duration (seconds)",
-                            minimum=1,
-                            maximum=10,
-                            value=5,
-                            step=1
+                        video_image = gr.Image(
+                            label="Optional Input Image (if supported by pipeline)",
+                            type="filepath"
                         )
                         
+                        video_duration = gr.Slider(label="Duration (seconds)", minimum=1, maximum=10, value=3, step=1)
+                        
                         with gr.Row():
-                            video_height = gr.Slider(
-                                label="Height",
-                                minimum=256,
-                                maximum=1024,
-                                value=576,
-                                step=64
-                            )
-                            video_width = gr.Slider(
-                                label="Width",
-                                minimum=256,
-                                maximum=1024,
-                                value=1024,
-                                step=64
-                            )
+                            video_height = gr.Slider(label="Height", minimum=256, maximum=720, value=320, step=64)
+                            video_width = gr.Slider(label="Width", minimum=256, maximum=720, value=512, step=64)
                         
                         video_btn = gr.Button("🎬 Generate Video", variant="primary")
                     
@@ -472,17 +451,12 @@ def create_demo():
                         generated_video = gr.Video(label="Generated Video Output")
                         video_status = gr.Textbox(label="Status", interactive=False)
                 
-                def generate_video(image, prompt, duration, height, width):
-                    if image is None:
-                        return None, "Please upload an image first"
-                    video_path, status = studio.generate_text_to_video(
-                        image, prompt, duration, height, width
-                    )
-                    return video_path, status
+                def generate_video(prompt, image, duration, height, width):
+                    return studio.generate_video(prompt, image, duration, height, width)
                 
                 video_btn.click(
                     generate_video,
-                    inputs=[video_image, video_prompt, video_duration, video_height, video_width],
+                    inputs=[video_prompt, video_image, video_duration, video_height, video_width],
                     outputs=[generated_video, video_status]
                 )
             
@@ -492,14 +466,14 @@ def create_demo():
                 
                 ### Features:
                 - **Lip Sync**: Create lip-sync videos with OpenVoice cloning + SadTalker
-                - **Text to Image**: Generate stunning images from text descriptions using FLUX.1-schnell
-                - **Text to Video**: Create dynamic videos from images using open-source SVD
+                - **Text to Image**: Generate stunning images from text using `PixArt-alpha` (Optimized for speed/VRAM)
+                - **Text to Video**: Create dynamic videos from descriptions using `LongCat Video`
                 
                 ### Models Used:
                 - **OpenVoice V2**: Zero-shot high fidelity voice cloning
                 - **SadTalker**: Accurate facial emotion rendering
-                - **FLUX.1-schnell**: Top-tier text-to-image pipeline
-                - **SVD**: Stable Video Diffusion XT
+                - **PixArt-α**: Performant text-to-image pipeline
+                - **LongCat-Video-T2V-Diffusers**: Coherent Video generation
                 """)
     
     return demo
