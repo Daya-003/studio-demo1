@@ -1,67 +1,60 @@
 #!/bin/bash
-echo "Setting up Demo 1 with STRICT ENVIRONMENT ISOLATION to prevent module errors..."
+# setup_demo1.sh - Install OpenVoice + SadTalker for VDAM Studio Demo
+# MIT License Compliant - Commercial Use OK
 
-# 1. Base OS Packages required for Audio and TTS (MeloTTS needs mecab)
-sudo apt-get update
-sudo apt-get install -y software-properties-common mecab libmecab-dev mecab-ipadic-utf8 build-essential ffmpeg
-sudo add-apt-repository -y ppa:deadsnakes/ppa
-sudo apt-get update
-sudo apt-get install -y python3.10 python3.10-venv python3.10-dev unzip wget git
+echo "🚀 Setting up VDAM Studio Demo 1: OpenVoice + SadTalker..."
 
-echo "============================================="
-echo "Building Environment 1: OpenVoice V2"
-echo "============================================="
-if [ ! -d "openvoice_env" ]; then
-    python3.10 -m venv openvoice_env
-fi
-source openvoice_env/bin/activate
-pip install --upgrade pip setuptools wheel
-pip install torch torchvision torchaudio
+# Create virtual environment
+python -m venv vdam_demo1_env
+source vdam_demo1_env/bin/activate  # Linux/Mac
+# On Windows: vdam_demo1_env\Scripts\activate
 
-if [ ! -d "OpenVoice" ]; then
-    git clone https://github.com/myshell-ai/OpenVoice.git
-    cd OpenVoice
-    pip install -e .
-    cd ..
-fi
+# Upgrade pip
+pip install --upgrade pip
 
-if [ ! -d "MeloTTS" ]; then
-    git clone https://github.com/myshell-ai/MeloTTS.git
-    cd MeloTTS
-    pip install -e .
-    python -m unidic download
-    cd ..
-fi
+# Install PyTorch (CPU for demo, GPU optional)
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
 
-if [ ! -d "checkpoints_v2" ]; then
-    wget -q https://myshell-public-repo-hosting.s3.amazonaws.com/openvoice/checkpoints_v2_0417.zip
-    unzip -q checkpoints_v2_0417.zip
-fi
-deactivate
-echo "OpenVoice Environment Built!"
+# Install core dependencies
+pip install gradio==4.44.0
+pip install librosa==0.10.1
+pip install numpy==1.26.4
+pip install gradio_client==1.2.0
 
-echo "============================================="
-echo "Building Environment 2: SadTalker UI"
-echo "============================================="
-if [ ! -d "sadtalker_env" ]; then
-    python3.10 -m venv sadtalker_env
-fi
-source sadtalker_env/bin/activate
-pip install --upgrade pip setuptools wheel
-pip install gradio pydub
+# Install OpenVoice (MIT License)
+cd /tmp
+git clone https://github.com/myshell-ai/OpenVoice
+cd OpenVoice
+pip install -e .
+pip install nltk
+python -c "import nltk; nltk.download('punkt')"
 
-if [ ! -d "SadTalker" ]; then
-    git clone https://github.com/OpenTalker/SadTalker.git
-    cd SadTalker
-    bash scripts/download_models.sh
-    pip install -r requirements.txt
-    cd ..
-fi
-deactivate
-echo "SadTalker Environment Built!"
+# Install SadTalker (MIT License)
+cd /tmp
+git clone https://github.com/OpenTalker/SadTalker.git
+cd SadTalker
+pip install -r requirements.txt
+pip install onnxruntime  # CPU inference
+pip install gfpgan
+pip install basicsr
 
-echo "============================================="
-echo "Setup Complete!"
-echo "To run Demo 1, activate the SadTalker environment ONLY:"
-echo "!source sadtalker_env/bin/activate && python app_demo1.py"
-echo "============================================="
+# Create demo directory
+mkdir -p ~/vdam_studio_demo1
+cd ~/vdam_studio_demo1
+
+# Download pretrained models (MIT compliant)
+echo "📥 Downloading pretrained models..."
+
+# OpenVoice models
+mkdir -p checkpoints_v2
+wget -O checkpoints_v2/vocab.txt https://huggingface.co/myshell-ai/OpenVoice/resolve/main/checkpoints_v2/vocab.txt
+wget -O checkpoints_v2/config.json https://huggingface.co/myshell-ai/OpenVoice/resolve/main/checkpoints_v2/config.json
+wget -O checkpoints_v2/openvoice_2024-05-04.pth https://huggingface.co/myshell-ai/OpenVoice/resolve/main/checkpoints_v2/openvoice_2024-05-04.pth
+
+# SadTalker models
+mkdir -p sadtalker_checkpoints
+wget -O sadtalker_checkpoints/whole_body.pth https://github.com/OpenTalker/SadTalker/releases/download/v0.0.2-rc/whole_body.pth
+wget -O sadtalker_checkpoints/wav2lip_gan.pth https://github.com/OpenTalker/SadTalker/releases/download/v0.0.2-rc/wav2lip_gan.pth
+
+echo "✅ Setup complete! Run: cd ~/vdam_studio_demo1 && python app_demo1.py"
+echo "💡 For GPU support, reinstall PyTorch with CUDA: pip install torch --index-url https://download.pytorch.org/whl/cu121"
