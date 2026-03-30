@@ -10,7 +10,8 @@ echo ">>> Setting up VDAM AI Studio Demo 1..."
 echo ">>> Installing Python Packages..."
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 pip install transformers diffusers accelerate gradio edge-tts scipy moviepy
-pip install safetensors huggingface_hub sentencepiece protobuf
+pip install safetensors huggingface_hub sentencepiece protobuf 
+pip install "TTS==0.22.0"
 
 # 2. Clone Repositories
 echo ">>> Cloning Repositories..."
